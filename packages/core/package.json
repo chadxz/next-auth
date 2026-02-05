@@ -91,6 +91,7 @@
   },
   "scripts": {
     "build": "pnpm css && pnpm providers && tsc",
+    "prepare": "pnpm build",
     "clean": "rm -rf *.js *.d.ts* lib providers",
     "css": "node scripts/generate-css",
     "dev": "pnpm css && pnpm providers && tsc -w",

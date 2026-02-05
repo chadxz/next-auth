@@ -199,6 +199,104 @@ AUTH_MICROSOFT_ENTRA_ID_SECRET="<Client secret value>"
 AUTH_MICROSOFT_ENTRA_ID_ISSUER="https://login.microsoftonline.com/<Directory (tenant) ID>/v2.0"
 ```
 
+## Azure Workload Identity
+
+For applications running in Kubernetes with
+[Azure Workload Identity](https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation),
+you can use federated credentials instead of client secrets. This eliminates
+the need to store and rotate secrets in your Kubernetes deployments.
+
+### Setup
+
+1. Configure your App Registration with a federated credential pointing to your
+   Kubernetes service account.
+
+2. Enable the Azure Workload Identity webhook on your Kubernetes cluster.
+
+3. Annotate your service account and pods to use workload identity.
+
+### Configuration
+
+Use the `clientAssertion` option to provide the federated token for
+authentication. The token file path is injected by the workload identity
+webhook via the `AZURE_FEDERATED_TOKEN_FILE` environment variable.
+
+<Code>
+  <Code.Svelte>
+
+```ts filename="/src/auth.ts"
+import { SvelteKitAuth } from "@auth/sveltekit"
+import MicrosoftEntraID from "@auth/sveltekit/providers/microsoft-entra-id"
+import { readFile } from "fs/promises"
+import { env } from "$env/dynamic/private"
+
+export const { handle, signIn, signOut } = SvelteKitAuth({
+  providers: [
+    MicrosoftEntraID({
+      clientId: env.AZURE_CLIENT_ID,
+      issuer: `https://login.microsoftonline.com/${env.AZURE_TENANT_ID}/v2.0`,
+      // Use workload identity in Kubernetes, client secret for local dev
+      clientAssertion: env.AZURE_FEDERATED_TOKEN_FILE
+        ? () => readFile(env.AZURE_FEDERATED_TOKEN_FILE, "utf8")
+        : undefined,
+      clientSecret: env.AZURE_CLIENT_SECRET,
+    }),
+  ],
+})
+```
+
+  </Code.Svelte>
+  <Code.Next>
+
+```ts filename="/auth.ts"
+import NextAuth from "next-auth"
+import MicrosoftEntraID from "next-auth/providers/microsoft-entra-id"
+import { readFile } from "fs/promises"
+
+export const { handlers, auth, signIn, signOut } = NextAuth({
+  providers: [
+    MicrosoftEntraID({
+      clientId: process.env.AZURE_CLIENT_ID,
+      issuer: `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}/v2.0`,
+      // Use workload identity in Kubernetes, client secret for local dev
+      clientAssertion: process.env.AZURE_FEDERATED_TOKEN_FILE
+        ? () => readFile(process.env.AZURE_FEDERATED_TOKEN_FILE, "utf8")
+        : undefined,
+      clientSecret: process.env.AZURE_CLIENT_SECRET,
+    }),
+  ],
+})
+```
+
+  </Code.Next>
+</Code>
+
+### Environment Variables
+
+In Kubernetes with workload identity enabled, the mutating webhook
+automatically injects these environment variables:
+
+| Variable                     | Description                                 |
+| ---------------------------- | ------------------------------------------- |
+| `AZURE_CLIENT_ID`            | App Registration client ID                  |
+| `AZURE_TENANT_ID`            | Azure tenant ID                             |
+| `AZURE_FEDERATED_TOKEN_FILE` | Path to the projected service account token |
+| `AZURE_AUTHORITY_HOST`       | Azure authority host URL                    |
+
+For local development, you can use a client secret instead by setting
+`AZURE_CLIENT_SECRET` in your environment.
+
+<Callout type="info">
+  When `clientAssertion` is provided, it takes precedence over `clientSecret`
+  for the token exchange. You can provide both options to support different
+  environments (workload identity in production, client secret locally).
+</Callout>
+
+### Resources
+
+- [Azure Workload Identity documentation](https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation)
+- [Configure workload identity on AKS](https://learn.microsoft.com/en-us/azure/aks/workload-identity-deploy-cluster)
+
 ## Notes
 
 - If the issuer paramater is not set it will default to

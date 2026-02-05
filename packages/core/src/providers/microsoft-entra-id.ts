@@ -438,9 +438,37 @@ export default function MicrosoftEntraID(
      * @default 48
      */
     profilePhotoSize?: 48 | 64 | 96 | 120 | 240 | 360 | 432 | 504 | 648
+    /**
+     * Optional callback to provide a client assertion for token exchange.
+     * Use this for Azure Workload Identity, Managed Identity, or certificate-based
+     * authentication. When provided, this is used instead of `clientSecret`.
+     *
+     * The callback should return a JWT token that will be sent as `client_assertion`
+     * with `client_assertion_type` set to `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`.
+     *
+     * @example
+     * ```ts
+     * import { readFile } from "fs/promises"
+     *
+     * MicrosoftEntraID({
+     *   clientId: process.env.AZURE_CLIENT_ID,
+     *   issuer: `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}/v2.0`,
+     *   // Use workload identity token file in Kubernetes
+     *   clientAssertion: process.env.AZURE_FEDERATED_TOKEN_FILE
+     *     ? () => readFile(process.env.AZURE_FEDERATED_TOKEN_FILE, "utf8")
+     *     : undefined,
+     *   // Fall back to client secret for local development
+     *   clientSecret: process.env.AZURE_CLIENT_SECRET,
+     * })
+     * ```
+     *
+     * @see https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-client-creds-grant-flow#second-case-access-token-request-with-a-federated-credential
+     * @see https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation
+     */
+    clientAssertion?: () => Promise<string>
   }
 ): OIDCConfig<MicrosoftEntraIDProfile> {
-  const { profilePhotoSize = 48 } = config
+  const { profilePhotoSize = 48, clientAssertion } = config
 
   // If issuer is not set, first fallback to environment variable, then
   // fallback to /common/ uri.
@@ -453,6 +481,11 @@ export default function MicrosoftEntraID(
     name: "Microsoft Entra ID",
     type: "oidc",
     authorization: { params: { scope: "openid profile email User.Read" } },
+    // When using clientAssertion, tell oauth4webapi not to add any client
+    // credentials itself. The customFetch handler below injects the assertion.
+    ...(clientAssertion && {
+      client: { token_endpoint_auth_method: "none" as const },
+    }),
     async profile(profile, tokens) {
       // https://learn.microsoft.com/en-us/graph/api/profilephoto-get?view=graph-rest-1.0&tabs=http#examples
       const response = await fetch(
@@ -479,17 +512,48 @@ export default function MicrosoftEntraID(
       }
     },
     style: { text: "#fff", bg: "#0072c6" },
-    async [customFetch](...args) {
-      const url = new URL(args[0] instanceof Request ? args[0].url : args[0])
+    async [customFetch](
+      input: RequestInfo | URL,
+      init?: RequestInit
+    ): Promise<Response> {
+      const url = new URL(
+        input instanceof Request ? input.url : input.toString()
+      )
+
+      // Fix {tenantid} placeholder in OIDC discovery response
       if (url.pathname.endsWith(".well-known/openid-configuration")) {
-        const response = await fetch(...args)
+        const response = await fetch(input, init)
         const json = await response.clone().json()
         const tenantRe = /microsoftonline\.com\/(\w+)\/v2\.0/
         const tenantId = config.issuer?.match(tenantRe)?.[1] ?? "common"
         const issuer = json.issuer.replace("{tenantid}", tenantId)
         return Response.json({ ...json, issuer })
       }
-      return fetch(...args)
+
+      // Inject client_assertion into token endpoint requests.
+      // oauth4webapi passes body as URLSearchParams for token requests.
+      if (
+        clientAssertion &&
+        url.pathname.endsWith("/oauth2/v2.0/token") &&
+        init?.body instanceof URLSearchParams
+      ) {
+        let assertion: string
+        try {
+          assertion = await clientAssertion()
+        } catch (error) {
+          throw new Error(
+            `Failed to get client assertion: ${error instanceof Error ? error.message : String(error)}. ` +
+              `Ensure AZURE_FEDERATED_TOKEN_FILE exists and is readable.`
+          )
+        }
+        init.body.set(
+          "client_assertion_type",
+          "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+        )
+        init.body.set("client_assertion", assertion)
+      }
+
+      return fetch(input, init)
     },
     [conformInternal]: true,
     options: config,
